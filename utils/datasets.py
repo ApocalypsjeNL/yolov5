@@ -30,6 +30,7 @@ from utils.augmentations import Albumentations, augment_hsv, copy_paste, letterb
 from utils.general import (DATASETS_DIR, LOGGER, NUM_THREADS, check_dataset, check_requirements, check_yaml, clean_str,
                            cv2, segments2boxes, xyn2xy, xywh2xyxy, xywhn2xyxy, xyxy2xywhn)
 from utils.torch_utils import torch_distributed_zero_first
+from pypylon import pylon
 
 # Parameters
 HELP_URL = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
@@ -324,17 +325,44 @@ class LoadStreams:
                 import pafy
                 s = pafy.new(s).getbest(preftype="mp4").url  # YouTube URL
             s = eval(s) if s.isnumeric() else s  # i.e. s = '0' local webcam
-            cap = cv2.VideoCapture(s)
-            assert cap.isOpened(), f'{st}Failed to open {s}'
-            w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)  # warning: may return 0 or nan
-            self.frames[i] = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 0) or float('inf')  # infinite stream fallback
-            self.fps[i] = max((fps if math.isfinite(fps) else 0) % 100, 0) or 30  # 30 FPS fallback
+            from pypylon import pylon
 
-            _, self.imgs[i] = cap.read()  # guarantee first frame
-            self.threads[i] = Thread(target=self.update, args=([i, cap, s]), daemon=True)
-            LOGGER.info(f"{st} Success ({self.frames[i]} frames {w}x{h} at {self.fps[i]:.2f} FPS)")
+            # conecting to the first available camera
+            camera = pylon.InstantCamera(pylon.TlFactory.GetInstance().CreateFirstDevice())
+
+            # Grabing Continusely (video) with minimal delay
+            camera.StartGrabbing(pylon.GrabStrategy_LatestImageOnly)
+            converter = pylon.ImageFormatConverter()
+
+            # converting to opencv bgr format
+            converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+            converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+
+
+            # cap = ()
+            # cap = cv2.VideoCapture(s)
+            # assert cap.isOpened(), f'{st}Failed to open {s}'
+            # w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            # h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            # fps = cap.get(cv2.CAP_PROP_FPS)  # warning: may return 0 or nan
+            # self.frames[i] = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 0) or float('inf')  # infinite stream fallback
+            # self.fps[i] = max((fps if math.isfinite(fps) else 0) % 100, 0) or 30  # 30 FPS fallback
+            grabResult = camera.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+
+            if grabResult.GrabSucceeded():
+                # Access the image data
+                image = converter.Convert(grabResult)
+                img = image.GetArray()
+                img = np.array(img, dtype='uint8')
+                self.imgs[i] = cv2.resize(img, (0,0), fx=0.5, fy=0.5)
+
+            grabResult.Release()
+            self.fps[i] = 30
+            self.frames[i] = float('inf')
+            #
+            # _, self.imgs[i] = cap.read()  # guarantee first frame
+            self.threads[i] = Thread(target=self.update, args=([i, camera, converter]), daemon=True)
+            # LOGGER.info(f"{st} Success ({self.frames[i]} frames {w}x{h} at {self.fps[i]:.2f} FPS)")
             self.threads[i].start()
         LOGGER.info('')  # newline
 
@@ -344,22 +372,40 @@ class LoadStreams:
         if not self.rect:
             LOGGER.warning('WARNING: Stream shapes differ. For optimal performance supply similarly-shaped streams.')
 
-    def update(self, i, cap, stream):
+    def update(self, i, cap, converter):
         # Read stream `i` frames in daemon thread
-        n, f, read = 0, self.frames[i], 1  # frame number, frame array, inference every 'read' frame
-        while cap.isOpened() and n < f:
-            n += 1
-            # _, self.imgs[index] = cap.read()
-            cap.grab()
-            if n % read == 0:
-                success, im = cap.retrieve()
-                if success:
-                    self.imgs[i] = im
-                else:
-                    LOGGER.warning('WARNING: Video stream unresponsive, please check your IP camera connection.')
-                    self.imgs[i] = np.zeros_like(self.imgs[i])
-                    cap.open(stream)  # re-open stream if signal was lost
+        # n, f, read = 0, self.frames[i], 1  # frame number, frame array, inference every 'read' frame
+        # while cap.isOpened() and n < f:
+        #     n += 1
+        #     # _, self.imgs[index] = cap.read()
+        #     cap.grab()
+        #     if n % read == 0:
+        #         success, im = cap.retrieve()
+        #         if success:
+        #             self.imgs[i] = im
+        #         else:
+        #             LOGGER.warning('WARNING: Video stream unresponsive, please check your IP camera connection.')
+        #             self.imgs[i] = np.zeros_like(self.imgs[i])
+        #             cap.open(stream)  # re-open stream if signal was lost
+        #     time.sleep(1 / self.fps[i])  # wait time
+
+        while cap.IsGrabbing():
+            grabResult = cap.RetrieveResult(5000, pylon.TimeoutHandling_ThrowException)
+
+            if grabResult.GrabSucceeded():
+                # Access the image data
+                image = converter.Convert(grabResult)
+                img = image.GetArray()
+                img = np.array(img, dtype='uint8')
+                self.imgs[i] = cv2.resize(img, (0,0), fx=0.5, fy=0.5)
+            else:
+                self.imgs[i] = np.zeros_like(self.imgs[i])
+
+            grabResult.Release()
             time.sleep(1 / self.fps[i])  # wait time
+
+        # Releasing the resource
+        cap.StopGrabbing()
 
     def __iter__(self):
         self.count = -1
