@@ -397,7 +397,8 @@ class LoadStreams:
                 image = converter.Convert(grabResult)
                 img = image.GetArray()
                 img = np.array(img, dtype='uint8')
-                self.imgs[i] = cv2.resize(img, (0,0), fx=0.5, fy=0.5)
+                newimg = img[590:1670, 1070:2990]
+                self.imgs[i] = cv2.resize(newimg, (0,0), fx=0.5, fy=0.5)
             else:
                 self.imgs[i] = np.zeros_like(self.imgs[i])
 
